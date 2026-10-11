@@ -16,7 +16,7 @@ pulseflow-generate = "pulseflow.generator:main"
 
 [project.optional-dependencies]
 streaming = [
-    "pyspark>=4.0",
+    "pyspark==4.2.0",
 ]
 ml = [
     "mlflow>=3.0",
