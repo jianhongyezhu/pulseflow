@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PulseFlow User Behaviour Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "user_id",
+    "session_id",
+    "event_type",
+    "content_id",
+    "device_type",
+    "country_code",
+    "event_ts"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "user_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_type": {
+      "enum": [
+        "PLAY",
+        "PAUSE",
+        "SKIP",
+        "SEARCH",
+        "LIKE",
+        "ADD_TO_PLAYLIST",
+        "PAGE_VIEW"
+      ]
+    },
+    "content_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "device_type": {
+      "enum": ["mobile", "desktop", "tablet", "tv"]
+    },
+    "country_code": {
+      "type": "string",
+      "pattern": "^[A-Z]{2}$"
+    },
+    "event_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}
