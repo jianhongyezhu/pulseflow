@@ -4,10 +4,13 @@ server:
 spring:
   application:
     name: pulseflow-ingestion
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     template:
-      default-topic: ${PULSEFLOW_TOPIC:user-behaviour.v1}
+      default-topic: ${pulseflow.kafka.topic}
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
@@ -15,6 +18,10 @@ spring:
       properties:
         enable.idempotence: true
         spring.json.add.type.headers: false
+
+pulseflow:
+  kafka:
+    topic: ${PULSEFLOW_TOPIC:user-behaviour.v1}
 
 management:
   endpoints:
