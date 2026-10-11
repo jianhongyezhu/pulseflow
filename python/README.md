@@ -61,3 +61,30 @@ The four checkpoints are:
 Corresponding output directories are under `data/bronze/user_behaviour`,
 `data/silver/user_behaviour`, `data/quarantine/user_behaviour`, and
 `data/gold/event_counts`.
+
+## DuckDB Analytics
+
+PulseFlow uses DuckDB to query Silver Parquet files directly on your machine; no
+separate database server is needed. First generate synthetic events with the
+event generator, run them through the Java ingestion API and Kafka, and let the
+Structured Streaming pipeline write Silver data. Silver contains validated
+events deduplicated by `event_id` within the configured event-time watermark.
+
+From the repository root, with the Python package installed, run:
+
+```bash
+python -m pulseflow.analytics
+```
+
+The event summary reads `data/silver/user_behaviour/` and groups by event type
+and device type. It reports event counts, distinct user IDs, and the earliest
+and latest event timestamps. These are synthetic behavioural events and do not
+represent real users. Watermark-based deduplication has a limited time horizon;
+duplicate IDs arriving outside the retained state may be counted again.
+
+Run the analytics tests without Kafka, Spark, Docker, or existing Silver data:
+
+```bash
+cd python
+python -m pytest tests/test_analytics.py
+```
