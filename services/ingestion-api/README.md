@@ -42,6 +42,129 @@ Kafka data is stored in the named `kafka-data` volume and survives normal
 container stops and removal. Do not use `docker compose down -v` unless you
 intentionally want to delete that volume and its Kafka data.
 
+## Local Kubernetes with kind
+
+This is a local-only demonstration. Install Docker, `kind`, and `kubectl`.
+The single Kafka Pod uses `emptyDir` storage: its records are lost if the Pod
+is recreated, and all demo Kafka data is lost when the kind cluster is deleted.
+It is not a durable Kafka deployment.
+
+From the repository root, create the single-control-plane cluster, build the
+existing Java image, and load it into kind:
+
+```bash
+kind create cluster --name pulseflow --config infra/kind/kind-config.yaml --wait 5m
+docker build -t pulseflow-ingestion:latest \
+  -f services/ingestion-api/Dockerfile services/ingestion-api
+kind load docker-image pulseflow-ingestion:latest --name pulseflow
+```
+
+Apply the namespace and Kafka resources, then wait for the broker:
+
+```bash
+kubectl apply -f infra/kubernetes/namespace.yaml
+kubectl apply -f infra/kubernetes/kafka.yaml
+kubectl rollout status deployment/kafka -n pulseflow --timeout=180s
+kubectl get pods,services -n pulseflow
+```
+
+Create the topic with six partitions and verify it:
+
+```bash
+kubectl exec -n pulseflow deployment/kafka -- \
+  /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka:9092 \
+  --create --if-not-exists \
+  --topic user-behaviour.v1 \
+  --partitions 6 \
+  --replication-factor 1
+kubectl exec -n pulseflow deployment/kafka -- \
+  /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka:9092 \
+  --describe --topic user-behaviour.v1
+```
+
+Deploy two API replicas and wait for both to become ready:
+
+```bash
+kubectl apply -f infra/kubernetes/ingestion-api.yaml
+kubectl rollout status deployment/ingestion-api -n pulseflow --timeout=180s
+kubectl get pods -n pulseflow -l app=ingestion-api
+```
+
+In one terminal, forward the internal API Service to localhost:
+
+```bash
+kubectl port-forward -n pulseflow service/ingestion-api 8080:8080
+```
+
+In another terminal, send synthetic events using the existing generator:
+
+```bash
+cd python
+python -m pip install -e .
+python -m pulseflow.generator \
+  --url http://localhost:8080/v1/events \
+  --events 10 --rps 2 --duplicate-rate 0
+```
+
+Inspect published Kafka records and their keys:
+
+```bash
+kubectl exec -n pulseflow deployment/kafka -- \
+  /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka:9092 \
+  --topic user-behaviour.v1 \
+  --from-beginning --max-messages 10 \
+  --formatter-property print.key=true \
+  --formatter-property key.separator=' | '
+```
+
+The API connects to `kafka:9092` through Kubernetes DNS. Local tools reach
+the API through `kubectl port-forward`; they do not connect to Kafka at
+`kafka:9092`. The Kafka and API Services are ClusterIP-only.
+Kafka's single KRaft controller votes for itself at `localhost:29093`, while
+the broker advertises `kafka:9092` to clients. The Kafka Service publishes its
+endpoint before readiness so this single broker can resolve its advertised
+address while starting; its Deployment uses `Recreate` to avoid overlapping
+brokers with the same node ID.
+
+Demonstrate API Deployment recovery by deleting one API Pod and waiting for its
+replacement:
+
+```bash
+POD="$(kubectl get pods -n pulseflow -l app=ingestion-api \
+  -o jsonpath='{.items[0].metadata.name}')"
+kubectl delete pod -n pulseflow "$POD"
+kubectl rollout status deployment/ingestion-api -n pulseflow --timeout=180s
+kubectl get pods -n pulseflow -l app=ingestion-api
+```
+
+For troubleshooting, inspect Pod details/events and logs:
+
+```bash
+kubectl describe pods -n pulseflow
+kubectl get events -n pulseflow --sort-by=.lastTimestamp
+kubectl logs -n pulseflow deployment/kafka
+kubectl logs -n pulseflow deployment/ingestion-api --all-pods=true --prefix=true
+kubectl logs -n pulseflow deployment/ingestion-api --all-pods=true \
+  --prefix=true --previous
+```
+
+Stop port-forwarding with Ctrl+C. Remove only the local demo namespace or
+cluster when finished:
+
+```bash
+kubectl delete namespace pulseflow
+# Or remove the whole local cluster:
+kind delete cluster --name pulseflow
+```
+
+Deleting the namespace removes the Kafka Pod and its ephemeral `emptyDir`;
+deleting the cluster removes all of its resources. Both operations discard
+the local demo Kafka records. They do not affect the separate Compose
+`kafka-data` volume or Spark Parquet/checkpoint data.
+
 ## Delivery and deduplication
 
 The API does not persist request IDs or deduplicate HTTP submissions. Submitting the same event more than once, including a client retry after a timeout or lost response, can create multiple Kafka records with the same `event_id`.
