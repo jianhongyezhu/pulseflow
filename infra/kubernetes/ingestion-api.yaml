@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: ingestion-api
-          image: pulseflow-ingestion:latest
+          image: pulseflow-ingestion:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

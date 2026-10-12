@@ -54,9 +54,9 @@ existing Java image, and load it into kind:
 
 ```bash
 kind create cluster --name pulseflow --config infra/kind/kind-config.yaml --wait 5m
-docker build -t pulseflow-ingestion:latest \
+docker build -t pulseflow-ingestion:dev \
   -f services/ingestion-api/Dockerfile services/ingestion-api
-kind load docker-image pulseflow-ingestion:latest --name pulseflow
+kind load docker-image pulseflow-ingestion:dev --name pulseflow
 ```
 
 Apply the namespace and Kafka resources, then wait for the broker:
@@ -98,14 +98,30 @@ In one terminal, forward the internal API Service to localhost:
 kubectl port-forward -n pulseflow service/ingestion-api 8080:8080
 ```
 
-In another terminal, send synthetic events using the existing generator:
+In another terminal, use the repository-root virtual environment to send
+synthetic events (no package reinstall is needed):
 
 ```bash
+source .venv/bin/activate
 cd python
-python -m pip install -e .
 python -m pulseflow.generator \
   --url http://localhost:8080/v1/events \
   --events 10 --rps 2 --duplicate-rate 0
+```
+
+For a subsequent API revision, build and load it with a new, unique tag, then
+update the Deployment to that tag. Changing the Pod template this way triggers
+a rollout; do not rebuild over an existing tag and rely on `IfNotPresent`,
+which may keep using the image already cached in the kind node:
+
+```bash
+IMAGE_TAG="dev-$(date -u +%Y%m%dT%H%M%SZ)"
+docker build -t "pulseflow-ingestion:${IMAGE_TAG}" \
+  -f services/ingestion-api/Dockerfile services/ingestion-api
+kind load docker-image "pulseflow-ingestion:${IMAGE_TAG}" --name pulseflow
+kubectl set image deployment/ingestion-api -n pulseflow \
+  "ingestion-api=pulseflow-ingestion:${IMAGE_TAG}"
+kubectl rollout status deployment/ingestion-api -n pulseflow --timeout=180s
 ```
 
 Inspect published Kafka records and their keys:
