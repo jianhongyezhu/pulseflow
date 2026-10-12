@@ -42,6 +42,50 @@ Kafka data is stored in the named `kafka-data` volume and survives normal
 container stops and removal. Do not use `docker compose down -v` unless you
 intentionally want to delete that volume and its Kafka data.
 
+## GitHub Actions CI
+
+The `CI` workflow runs on pull requests and pushes to `main`. It verifies the
+Java service with `mvn clean verify`, runs Ruff and the full Python test suite
+(including PySpark transformation and DuckDB analytics tests), then builds the
+ingestion API Docker image after both test jobs pass. The Docker job builds
+locally on the runner and does not push an image or deploy an environment.
+
+The `Kind smoke test` workflow runs on manual dispatch or pull requests that
+change the Java service, Dockerfile, Kubernetes/kind resources, smoke-test
+script, or the workflow itself. It creates an isolated `pulseflow-ci` kind
+cluster, deploys Kafka and the API, publishes one event, and verifies its Kafka
+key. It deletes only that workflow's disposable cluster at job completion.
+Neither workflow deploys to a live or production environment.
+
+Run the CI checks locally from the repository root:
+
+```bash
+mvn --batch-mode --file services/ingestion-api/pom.xml clean verify
+source .venv/bin/activate
+ruff check python/
+python -m pytest -q python/tests
+docker build --file services/ingestion-api/Dockerfile \
+  --tag pulseflow-ingestion services/ingestion-api
+```
+
+The Python tests require Java 21 and the project's `streaming` and `dev`
+extras; install them once with `python -m pip install -e "./python[streaming,dev]"`.
+To run the kind smoke test on GitHub, open **Actions → Kind smoke test → Run
+workflow**. For a local end-to-end run, follow the kind steps below with a
+disposable cluster named `pulseflow-ci`. In those commands, use
+`kind create cluster --name pulseflow-ci`, build/load the
+`pulseflow-ingestion` image, apply the namespace and Kafka resources, wait for
+Kafka, and create the six-partition topic. Apply a temporary copy of the API
+manifest with its image changed from `pulseflow-ingestion:dev` to
+`pulseflow-ingestion`; the workflow makes this temporary substitution and does
+not change the tracked local `:dev` manifest. Then follow the port-forward,
+health, event-publishing, and Kafka-verification steps below. Clean up only
+your own disposable cluster with `kind delete cluster --name pulseflow-ci`.
+
+For CI failures, open the failed workflow run and inspect the job logs. The
+kind smoke job also captures Pod status, descriptions, events, Kafka/API logs,
+and the API port-forward log on failure.
+
 ## Local Kubernetes with kind
 
 This is a local-only demonstration. Install Docker, `kind`, and `kubectl`.
