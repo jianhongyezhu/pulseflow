@@ -1,0 +1,215 @@
+name: Kind smoke test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "services/ingestion-api/src/**"
+      - "services/ingestion-api/pom.xml"
+      - "services/ingestion-api/Dockerfile"
+      - "services/ingestion-api/.dockerignore"
+      - "infra/kubernetes/**"
+      - "infra/kind/**"
+      - "scripts/smoke-test.sh"
+      - ".github/workflows/kind-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  kind-smoke:
+    name: Deploy and smoke test on kind
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install kubectl
+        run: |
+          KUBECTL_VERSION="v1.36.1"
+          KUBECTL_URL="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl --fail --silent --show-error --location \
+            "$KUBECTL_URL" \
+            --output "$RUNNER_TEMP/kubectl"
+          curl --fail --silent --show-error --location \
+            "${KUBECTL_URL}.sha256" \
+            --output "$RUNNER_TEMP/kubectl.sha256"
+          printf '%s  %s\n' \
+            "$(cat "$RUNNER_TEMP/kubectl.sha256")" "$RUNNER_TEMP/kubectl" \
+            | sha256sum --check --status
+          sudo install -o root -g root -m 0755 "$RUNNER_TEMP/kubectl" /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install kind
+        run: |
+          KIND_VERSION="v0.33.0"
+          KIND_URL="https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          curl --fail --silent --show-error --location \
+            "$KIND_URL" \
+            --output "$RUNNER_TEMP/kind-linux-amd64"
+          curl --fail --silent --show-error --location \
+            "${KIND_URL}.sha256sum" \
+            --output "$RUNNER_TEMP/kind.sha256sum"
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum --check kind.sha256sum
+          )
+          sudo install -o root -g root -m 0755 \
+            "$RUNNER_TEMP/kind-linux-amd64" /usr/local/bin/kind
+          kind version
+
+      - name: Create disposable kind cluster
+        run: kind create cluster --name pulseflow-ci --config infra/kind/kind-config.yaml --wait 5m
+
+      - name: Build and load ingestion image
+        run: |
+          docker build \
+            --file services/ingestion-api/Dockerfile \
+            --tag pulseflow-ingestion \
+            services/ingestion-api
+          kind load docker-image pulseflow-ingestion --name pulseflow-ci
+
+      - name: Deploy namespace and Kafka
+        run: |
+          kubectl apply -f infra/kubernetes/namespace.yaml
+          kubectl apply -f infra/kubernetes/kafka.yaml
+          kubectl rollout status deployment/kafka -n pulseflow --timeout=5m
+          kubectl wait --for=condition=Ready pod -l app=kafka -n pulseflow --timeout=60s
+
+      - name: Create and verify Kafka topic
+        run: |
+          kubectl exec -n pulseflow deployment/kafka -- \
+            /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:9092 \
+            --create --if-not-exists \
+            --topic user-behaviour.v1 \
+            --partitions 6 \
+            --replication-factor 1
+          TOPIC_DESCRIPTION="$(
+            kubectl exec -n pulseflow deployment/kafka -- \
+              /opt/kafka/bin/kafka-topics.sh \
+              --bootstrap-server kafka:9092 \
+              --describe --topic user-behaviour.v1
+          )"
+          printf '%s\n' "$TOPIC_DESCRIPTION"
+          grep -q 'PartitionCount: 6' <<<"$TOPIC_DESCRIPTION"
+
+      - name: Deploy API using the CI image tag
+        run: |
+          sed 's|image: pulseflow-ingestion:dev|image: pulseflow-ingestion|' \
+            infra/kubernetes/ingestion-api.yaml > "$RUNNER_TEMP/ingestion-api.yaml"
+          grep -q 'image: pulseflow-ingestion$' "$RUNNER_TEMP/ingestion-api.yaml"
+          kubectl apply -f "$RUNNER_TEMP/ingestion-api.yaml"
+          kubectl rollout status deployment/ingestion-api -n pulseflow --timeout=5m
+          kubectl wait --for=condition=Available deployment/ingestion-api \
+            -n pulseflow --timeout=60s
+          READY_REPLICAS="$(
+            kubectl get deployment ingestion-api -n pulseflow \
+              -o jsonpath='{.status.readyReplicas}'
+          )"
+          test "$READY_REPLICAS" = "2"
+
+      - name: Port-forward API
+        run: |
+          kubectl port-forward -n pulseflow service/ingestion-api 8080:8080 \
+            > "$RUNNER_TEMP/api-port-forward.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/api-port-forward.pid"
+
+      - name: Wait for API health
+        run: |
+          deadline=$((SECONDS + 60))
+          until curl --fail --silent --show-error \
+            --connect-timeout 2 --max-time 3 \
+            http://localhost:8080/actuator/health \
+            > "$RUNNER_TEMP/api-health.json"; do
+            if (( SECONDS >= deadline )); then
+              echo "API health endpoint did not become ready within 60 seconds." >&2
+              cat "$RUNNER_TEMP/api-port-forward.log" >&2 || true
+              exit 1
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/api-health.json"
+
+      - name: Publish and verify test event
+        run: |
+          EVENT_ID="$(python -c 'import uuid; print(uuid.uuid4())')"
+          USER_ID="ci-${EVENT_ID}"
+          SESSION_ID="session-${EVENT_ID}"
+          EVENT_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export EVENT_ID USER_ID SESSION_ID EVENT_TS
+          python - <<'PY' > "$RUNNER_TEMP/event.json"
+          import json
+          import os
+
+          print(json.dumps({
+              "event_id": os.environ["EVENT_ID"],
+              "user_id": os.environ["USER_ID"],
+              "session_id": os.environ["SESSION_ID"],
+              "event_type": "PLAY",
+              "content_id": "track-ci-smoke-test",
+              "device_type": "desktop",
+              "country_code": "GB",
+              "event_ts": os.environ["EVENT_TS"],
+              "attributes": {"source": "github-actions"},
+          }))
+          PY
+
+          HTTP_STATUS="$(
+            curl --silent --show-error \
+              --output "$RUNNER_TEMP/api-response.json" \
+              --write-out '%{http_code}' \
+              --header 'Content-Type: application/json' \
+              --data-binary "@$RUNNER_TEMP/event.json" \
+              http://localhost:8080/v1/events
+          )"
+          cat "$RUNNER_TEMP/api-response.json"
+          test "$HTTP_STATUS" = "202"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          response = json.loads(Path(os.environ["RUNNER_TEMP"], "api-response.json").read_text())
+          assert response == {"event_id": os.environ["EVENT_ID"], "status": "accepted"}
+          PY
+
+          RECORD="$(
+            kubectl exec -n pulseflow deployment/kafka -- \
+              /opt/kafka/bin/kafka-console-consumer.sh \
+              --bootstrap-server kafka:9092 \
+              --topic user-behaviour.v1 \
+              --from-beginning \
+              --max-messages 1 \
+              --timeout-ms 30000 \
+              --formatter-property print.key=true \
+              --formatter-property key.separator=$'\t'
+          )"
+          printf '%s\n' "$RECORD"
+          export RECORD
+          python - <<'PY'
+          import json
+          import os
+
+          key, payload = os.environ["RECORD"].split("\t", 1)
+          event = json.loads(payload)
+          assert key == os.environ["USER_ID"]
+          assert event["user_id"] == os.environ["USER_ID"]
+          assert event["event_id"] == os.environ["EVENT_ID"]
+          PY
+
+      - name: Collect Kubernetes diagnostics on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl describe pods -n pulseflow || true
+          kubectl get events -n pulseflow --sort-by=.lastTimestamp || true
+          kubectl logs -n pulseflow deployment/kafka --all-pods=true --prefix=true || true
+          kubectl logs -n pulseflow deployment/ingestion-api --all-pods=true --prefix=true || true
+          cat "$RUNNER_TEMP/api-port-forward.log" 2>/dev/null || true
+
+      - name: Remove disposable CI cluster
+        if: always()
+        run: kind delete cluster --name pulseflow-ci
