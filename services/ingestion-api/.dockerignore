@@ -1,0 +1,15 @@
+.git
+.env*
+.idea
+.vscode
+target
+*.iml
+*.log
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+logs
+tmp

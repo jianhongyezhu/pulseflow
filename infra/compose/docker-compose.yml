@@ -46,5 +46,18 @@ services:
       retries: 10
       start_period: 20s
 
+  ingestion-api:
+    image: pulseflow-ingestion
+    build:
+      context: ../../services/ingestion-api
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: broker:19092
+      PULSEFLOW_TOPIC: user-behaviour.v1
+    depends_on:
+      broker:
+        condition: service_healthy
+
 volumes:
   kafka-data:
