@@ -24,6 +24,12 @@ pulseflow:
     topic: ${PULSEFLOW_TOPIC:user-behaviour.v1}
 
 management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+      slo:
+        http.server.requests: 10,25,50,100,250,500,1000,2500,5000
   endpoints:
     web:
       exposure:

@@ -1,0 +1,20 @@
+groups:
+  - name: pulseflow-availability
+    rules:
+      - alert: PulseFlowApiDown
+        expr: up{job="ingestion-api"} == 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: PulseFlow ingestion API metrics endpoint is unavailable
+          description: Prometheus cannot scrape ingestion-api:8080/actuator/prometheus.
+
+      - alert: PulseFlowStreamingStopped
+        expr: up{job="spark-streaming"} == 0
+        for: 60s
+        labels:
+          severity: warning
+        annotations:
+          summary: PulseFlow Spark metrics endpoint is unavailable
+          description: The WSL-hosted Spark metrics exporter is unavailable or intentionally stopped.

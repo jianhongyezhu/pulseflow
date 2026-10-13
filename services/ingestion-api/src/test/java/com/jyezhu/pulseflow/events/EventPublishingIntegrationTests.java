@@ -20,6 +20,7 @@ import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -64,6 +65,15 @@ class EventPublishingIntegrationTests {
         verify(kafkaTemplate, times(2)).send(anyString(), anyString(), any(UserEvent.class));
         assertEquals(0.0, meterRegistry.counter("pulseflow.events.published").count());
         assertEquals(2.0, meterRegistry.counter("pulseflow.events.publish.failures").count());
+    }
+
+    @Test
+    void prometheusEndpointExposesRequestHistogramBuckets() throws Exception {
+        mockMvc.perform(get("/actuator/prometheus"))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString(
+                        "http_server_requests_active_seconds_bucket{"
+                )));
     }
 
     private org.springframework.test.web.servlet.ResultActions postEvent() throws Exception {

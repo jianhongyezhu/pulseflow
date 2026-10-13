@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
+from typing import Mapping
 
+from prometheus_client import CollectorRegistry, start_http_server
+from prometheus_client.core import GaugeMetricFamily
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQuery
@@ -115,13 +120,45 @@ class PipelineConfig:
     bootstrap_servers: str
     topic: str
     data_root: Path
+    metrics_enabled: bool = False
+    metrics_host: str = "127.0.0.1"
+    metrics_port: int = 9108
 
     @classmethod
     def from_environment(cls) -> PipelineConfig:
+        metrics_enabled_value = os.environ.get("PULSEFLOW_METRICS_ENABLED", "false").lower()
+        if metrics_enabled_value not in {"true", "false"}:
+            raise ValueError("PULSEFLOW_METRICS_ENABLED must be either true or false")
+        metrics_port = int(os.environ.get("PULSEFLOW_METRICS_PORT", "9108"))
+        if not 1 <= metrics_port <= 65535:
+            raise ValueError("PULSEFLOW_METRICS_PORT must be between 1 and 65535")
+        metrics_host = os.environ.get("PULSEFLOW_METRICS_HOST", "127.0.0.1").strip()
+        if not metrics_host:
+            raise ValueError("PULSEFLOW_METRICS_HOST must not be empty")
+        if metrics_host != "localhost":
+            try:
+                host_address = ip_address(metrics_host)
+            except ValueError as exc:
+                raise ValueError(
+                    "PULSEFLOW_METRICS_HOST must be localhost or a private IP address"
+                ) from exc
+            if host_address.is_unspecified:
+                raise ValueError("PULSEFLOW_METRICS_HOST must not be a wildcard address")
+            if not (
+                host_address.is_loopback
+                or host_address.is_private
+                or host_address.is_link_local
+            ):
+                raise ValueError(
+                    "PULSEFLOW_METRICS_HOST must be localhost or a private IP address"
+                )
         return cls(
             bootstrap_servers=os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
             topic=os.environ.get("PULSEFLOW_TOPIC", "user-behaviour.v1"),
             data_root=Path(os.environ.get("PULSEFLOW_DATA_ROOT", "data")).expanduser().resolve(),
+            metrics_enabled=metrics_enabled_value == "true",
+            metrics_host=metrics_host,
+            metrics_port=metrics_port,
         )
 
     def output_path(self, layer: str, name: str) -> Path:
@@ -129,6 +166,94 @@ class PipelineConfig:
 
     def checkpoint_path(self, name: str) -> Path:
         return self.data_root / "checkpoints" / name
+
+
+class StreamingMetricsCollector:
+    """Expose only observed Silver progress fields; missing measurements stay absent."""
+
+    _METRICS = {
+        "pulseflow_stream_input_rows_per_second": (
+            "Rows per second entering the Silver streaming query.",
+        ),
+        "pulseflow_stream_processed_rows_per_second": (
+            "Rows per second processed by the Silver streaming query.",
+        ),
+        "pulseflow_stream_batch_duration_ms": (
+            "Silver streaming microbatch trigger execution duration in milliseconds.",
+        ),
+    }
+
+    def __init__(self) -> None:
+        self.registry = CollectorRegistry()
+        self._values: dict[str, float] = {}
+        self._lock = Lock()
+        self.registry.register(self)
+
+    def describe(self):
+        for name, (description,) in self._METRICS.items():
+            yield GaugeMetricFamily(name, description)
+
+    def collect(self):
+        for name, value in self._snapshot().items():
+            description = self._METRICS[name][0]
+            metric = GaugeMetricFamily(name, description)
+            metric.add_metric([], value)
+            yield metric
+
+    def update(self, progress: Mapping | None) -> None:
+        if not isinstance(progress, Mapping):
+            return
+
+        updates: dict[str, float] = {}
+        sources = progress.get("sources")
+        if isinstance(sources, list):
+            rates = [
+                self._finite_number(source.get("inputRowsPerSecond"))
+                for source in sources
+                if isinstance(source, Mapping)
+            ]
+            available_rates = [rate for rate in rates if rate is not None]
+            if available_rates:
+                updates["pulseflow_stream_input_rows_per_second"] = sum(available_rates)
+
+        processed_rate = self._finite_number(progress.get("processedRowsPerSecond"))
+        if processed_rate is not None:
+            updates["pulseflow_stream_processed_rows_per_second"] = processed_rate
+
+        durations = progress.get("durationMs")
+        if isinstance(durations, Mapping):
+            batch_duration = self._finite_number(durations.get("triggerExecution"))
+            if batch_duration is not None:
+                updates["pulseflow_stream_batch_duration_ms"] = batch_duration
+
+        if updates:
+            with self._lock:
+                self._values.update(updates)
+
+    @staticmethod
+    def _finite_number(value) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) and number >= 0 else None
+
+    def _snapshot(self) -> dict[str, float]:
+        with self._lock:
+            return self._values.copy()
+
+
+def start_stream_metrics_exporter(host: str, port: int):
+    """Start one process-local metrics server with an isolated registry."""
+    collector = StreamingMetricsCollector()
+    server, thread = start_http_server(port, addr=host, registry=collector.registry)
+    logger.info("Started Spark metrics exporter on %s:%s", host, port)
+    return collector, server, thread
+
+
+def stop_stream_metrics_exporter(server, thread) -> None:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
 
 
 def configure_spark_session(spark: SparkSession) -> None:
@@ -414,7 +539,11 @@ def start_pipeline(spark: SparkSession, config: PipelineConfig) -> list[Streamin
         raise
 
 
-def _monitor_queries(queries: list[StreamingQuery], stopping: Event) -> None:
+def _monitor_queries(
+    queries: list[StreamingQuery],
+    stopping: Event,
+    metrics_collector: StreamingMetricsCollector | None = None,
+) -> None:
     """Wait until shutdown and surface any query that terminates with a failure."""
     while not stopping.is_set():
         for query in queries:
@@ -425,6 +554,8 @@ def _monitor_queries(queries: list[StreamingQuery], stopping: Event) -> None:
                     raise RuntimeError(f"Streaming query {query.name} failed") from failure
                 logger.error("Streaming query %s stopped unexpectedly", query.name)
                 raise RuntimeError(f"Streaming query {query.name} stopped unexpectedly")
+            if metrics_collector is not None and query.name == "pulseflow_silver":
+                metrics_collector.update(query.lastProgress)
         stopping.wait(1)
 
 
@@ -433,13 +564,21 @@ def run_pipeline(config: PipelineConfig | None = None) -> int:
     pipeline_config = config or PipelineConfig.from_environment()
     spark: SparkSession | None = None
     queries: list[StreamingQuery] = []
+    metrics_server = None
+    metrics_thread = None
     stopping = Event()
     original_sigterm_handler = signal.getsignal(signal.SIGTERM)
     try:
         signal.signal(signal.SIGTERM, lambda _signum, _frame: stopping.set())
         spark = create_spark_session()
         queries = start_pipeline(spark, pipeline_config)
-        _monitor_queries(queries, stopping)
+        metrics_collector = None
+        if pipeline_config.metrics_enabled:
+            metrics_collector, metrics_server, metrics_thread = start_stream_metrics_exporter(
+                pipeline_config.metrics_host,
+                pipeline_config.metrics_port,
+            )
+        _monitor_queries(queries, stopping, metrics_collector)
         return 0
     except KeyboardInterrupt:
         logger.info("Shutdown requested; stopping PulseFlow streaming queries")
@@ -450,6 +589,11 @@ def run_pipeline(config: PipelineConfig | None = None) -> int:
     finally:
         signal.signal(signal.SIGTERM, original_sigterm_handler)
         _stop_queries(queries)
+        if metrics_server is not None and metrics_thread is not None:
+            try:
+                stop_stream_metrics_exporter(metrics_server, metrics_thread)
+            except Exception:
+                logger.exception("Failed to stop Spark metrics exporter")
         if spark is not None:
             try:
                 spark.stop()
