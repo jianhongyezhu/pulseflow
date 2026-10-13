@@ -86,6 +86,62 @@ For CI failures, open the failed workflow run and inspect the job logs. The
 kind smoke job also captures Pod status, descriptions, events, Kafka/API logs,
 and the API port-forward log on failure.
 
+## Tagged GHCR releases
+
+The `Publish ingestion API release` workflow runs only when a version tag
+matching `v*.*.*` is pushed. Before publishing, it accepts only stable
+`vMAJOR.MINOR.PATCH` tags (for example, `v0.1.0`) on a commit that is already
+part of `origin/main`, and only in `jianhongyezhu/pulseflow`. It builds the
+existing `services/ingestion-api/` Docker context and publishes
+`ghcr.io/jianhongyezhu/pulseflow-ingestion:<version>` using the built-in
+GitHub Actions token. The image includes the PulseFlow source-repository OCI
+label. It does not create a floating `latest` tag.
+
+Create and push a release tag only after the release PR has been merged into
+`main`. This workflow does not create the tag for you:
+
+```bash
+git fetch origin main
+git switch main
+git pull --ff-only origin main
+git tag -a v0.1.0 -m "PulseFlow v0.1.0"
+git push origin v0.1.0
+```
+
+For example, pull the image published for `v0.1.0` with:
+
+```bash
+docker pull ghcr.io/jianhongyezhu/pulseflow-ingestion:0.1.0
+```
+
+Check the release workflow run's summary for its image name, version, and
+digest. To inspect the registry manifest and confirm its source/version
+metadata, use:
+
+```bash
+docker buildx imagetools inspect \
+  ghcr.io/jianhongyezhu/pulseflow-ingestion:0.1.0
+docker pull ghcr.io/jianhongyezhu/pulseflow-ingestion:0.1.0
+docker image inspect ghcr.io/jianhongyezhu/pulseflow-ingestion:0.1.0 \
+  --format '{{index .Config.Labels "org.opencontainers.image.source"}} {{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}'
+git rev-list -n 1 v0.1.0
+```
+
+The `org.opencontainers.image.revision` value should match the commit printed
+by `git rev-list`; the workflow run verifies that commit is on `main`. Its
+digest identifies the exact published image. The package's visibility and
+repository association can be checked under the
+repository owner's GitHub **Packages** page and the package's settings. Do not
+assume the package is public: confirm its visibility there before distributing
+pull instructions to users who are not authenticated.
+
+CI tests code and builds an image without publishing it. A tagged release
+delivers a versioned image to GHCR. Neither action deploys the platform:
+the Kubernetes manifests continue to use their existing local
+`pulseflow-ingestion:dev` image, and changing a Deployment to use a released
+image requires a separate, deliberate deployment step. Publishing to GHCR
+does not deploy the API, Kafka, or any other part of PulseFlow.
+
 ## Local Kubernetes with kind
 
 This is a local-only demonstration. Install Docker, `kind`, and `kubectl`.
