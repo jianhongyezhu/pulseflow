@@ -11,9 +11,11 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
@@ -52,6 +54,8 @@ class EventPublishingIntegrationTests {
 
     @Test
     void mapsKafkaFailureTo503AndUnexpectedFailureToSafe500() throws Exception {
+        double publishedBefore = meterRegistry.counter("pulseflow.events.published").count();
+        double failuresBefore = meterRegistry.counter("pulseflow.events.publish.failures").count();
         when(kafkaTemplate.send(anyString(), anyString(), any(UserEvent.class)))
                 .thenReturn(CompletableFuture.failedFuture(new KafkaException("broker unavailable")))
                 .thenThrow(new IllegalStateException("internal diagnostic sentinel"));
@@ -63,17 +67,33 @@ class EventPublishingIntegrationTests {
                         org.hamcrest.Matchers.containsString("internal diagnostic sentinel"))));
 
         verify(kafkaTemplate, times(2)).send(anyString(), anyString(), any(UserEvent.class));
-        assertEquals(0.0, meterRegistry.counter("pulseflow.events.published").count());
-        assertEquals(2.0, meterRegistry.counter("pulseflow.events.publish.failures").count());
+        assertEquals(publishedBefore, meterRegistry.counter("pulseflow.events.published").count());
+        assertEquals(
+                failuresBefore + 2,
+                meterRegistry.counter("pulseflow.events.publish.failures").count()
+        );
     }
 
     @Test
-    void prometheusEndpointExposesRequestHistogramBuckets() throws Exception {
-        mockMvc.perform(get("/actuator/prometheus"))
+    void prometheusEndpointExposesCompletedIngestionRequestHistogramBuckets() throws Exception {
+        when(kafkaTemplate.send(anyString(), anyString(), any(UserEvent.class)))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        postEvent().andExpect(status().isAccepted());
+
+        String metrics = mockMvc.perform(get("/actuator/prometheus"))
                 .andExpect(status().isOk())
-                .andExpect(content().string(org.hamcrest.Matchers.containsString(
-                        "http_server_requests_active_seconds_bucket{"
-                )));
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        boolean ingestionBucketExists = Arrays.stream(metrics.split("\\R"))
+                .filter(line -> line.startsWith("http_server_requests_seconds_bucket{"))
+                .anyMatch(line -> line.contains("uri=\"/v1/events\""));
+        assertTrue(
+                ingestionBucketExists,
+                "Expected a completed-request histogram bucket for POST /v1/events"
+        );
     }
 
     private org.springframework.test.web.servlet.ResultActions postEvent() throws Exception {

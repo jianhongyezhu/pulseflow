@@ -52,6 +52,9 @@ def test_grafana_provisioning_and_dashboard_have_expected_panels():
     assert "http_server_requests_seconds_bucket" in queries[1]
     assert 'status=~"5.."' in queries[2]
     assert "or vector(0)" in queries[2]
+    api_queries = queries[:3]
+    assert all('job="ingestion-api"' in query for query in api_queries)
+    assert [query.count('uri="/v1/events"') for query in api_queries] == [1, 1, 2]
     assert queries[3:6] == [
         "pulseflow_stream_input_rows_per_second",
         "pulseflow_stream_processed_rows_per_second",
