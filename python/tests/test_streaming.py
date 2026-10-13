@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from urllib.request import urlopen
 from uuid import uuid4
 
 import pytest
@@ -19,6 +20,7 @@ from pulseflow.streaming import (
     USER_EVENT_SCHEMA,
     WATERMARK_DELAY,
     PipelineConfig,
+    StreamingMetricsCollector,
     _write_parquet,
     aggregate_deduplicated_events,
     bronze_from_kafka,
@@ -27,6 +29,8 @@ from pulseflow.streaming import (
     configure_spark_session,
     deduplicate_events,
     parse_events,
+    start_stream_metrics_exporter,
+    stop_stream_metrics_exporter,
 )
 
 
@@ -126,6 +130,110 @@ def test_pipeline_config_reads_environment_and_resolves_paths(monkeypatch, tmp_p
         tmp_path / "state" / "bronze" / "user_behaviour"
     )
     assert config.checkpoint_path("gold") == tmp_path / "state" / "checkpoints" / "gold"
+
+
+def test_pipeline_config_metrics_exporter_is_opt_in_and_explicit(monkeypatch):
+    monkeypatch.delenv("PULSEFLOW_METRICS_ENABLED", raising=False)
+    monkeypatch.delenv("PULSEFLOW_METRICS_HOST", raising=False)
+    monkeypatch.delenv("PULSEFLOW_METRICS_PORT", raising=False)
+
+    disabled = PipelineConfig.from_environment()
+    assert disabled.metrics_enabled is False
+    assert disabled.metrics_host == "127.0.0.1"
+    assert disabled.metrics_port == 9108
+
+    monkeypatch.setenv("PULSEFLOW_METRICS_ENABLED", "true")
+    monkeypatch.setenv("PULSEFLOW_METRICS_HOST", "192.168.1.4")
+    monkeypatch.setenv("PULSEFLOW_METRICS_PORT", "19108")
+    enabled = PipelineConfig.from_environment()
+    assert enabled.metrics_enabled is True
+    assert enabled.metrics_host == "192.168.1.4"
+    assert enabled.metrics_port == 19108
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+def test_pipeline_config_rejects_wildcard_metrics_bind_addresses(monkeypatch, host):
+    monkeypatch.setenv("PULSEFLOW_METRICS_HOST", host)
+
+    with pytest.raises(ValueError, match="must not be a wildcard address"):
+        PipelineConfig.from_environment()
+
+
+def test_pipeline_config_rejects_public_metrics_bind_address(monkeypatch):
+    monkeypatch.setenv("PULSEFLOW_METRICS_HOST", "8.8.8.8")
+
+    with pytest.raises(ValueError, match="must be localhost or a private IP address"):
+        PipelineConfig.from_environment()
+
+
+def test_pipeline_config_rejects_empty_metrics_bind_address(monkeypatch):
+    monkeypatch.setenv("PULSEFLOW_METRICS_HOST", " ")
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        PipelineConfig.from_environment()
+
+
+def test_silver_metrics_map_progress_and_omit_missing_fields():
+    collector = StreamingMetricsCollector()
+    collector.update(None)
+    assert list(collector.registry.collect()) == []
+
+    collector.update(
+        {
+            "sources": [{"inputRowsPerSecond": 2.5}, {"inputRowsPerSecond": 1.5}],
+            "processedRowsPerSecond": 3.0,
+            "durationMs": {"triggerExecution": 125},
+        }
+    )
+    samples = {
+        metric.name: metric.samples[0].value
+        for metric in collector.registry.collect()
+    }
+    assert samples == {
+        "pulseflow_stream_input_rows_per_second": 4.0,
+        "pulseflow_stream_processed_rows_per_second": 3.0,
+        "pulseflow_stream_batch_duration_ms": 125.0,
+    }
+
+    collector.update({"sources": [{}], "durationMs": {}})
+    assert {
+        metric.name: metric.samples[0].value
+        for metric in collector.registry.collect()
+    } == samples
+
+
+def test_silver_metrics_ignore_non_finite_or_invalid_progress_values():
+    collector = StreamingMetricsCollector()
+    collector.update(
+        {
+            "sources": [{"inputRowsPerSecond": float("nan")}],
+            "processedRowsPerSecond": "unknown",
+            "durationMs": {"triggerExecution": -1},
+        }
+    )
+
+    assert list(collector.registry.collect()) == []
+
+
+def test_silver_metrics_exporter_serves_mocked_progress_over_http():
+    collector, server, thread = start_stream_metrics_exporter("127.0.0.1", 0)
+    try:
+        collector.update(
+            {
+                "sources": [{"inputRowsPerSecond": 2.0}],
+                "processedRowsPerSecond": 1.5,
+                "durationMs": {"triggerExecution": 75},
+            }
+        )
+        port = server.server_address[1]
+        with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
+            metrics = response.read().decode("utf-8")
+
+        assert "pulseflow_stream_input_rows_per_second 2.0" in metrics
+        assert "pulseflow_stream_processed_rows_per_second 1.5" in metrics
+        assert "pulseflow_stream_batch_duration_ms 75.0" in metrics
+    finally:
+        stop_stream_metrics_exporter(server, thread)
 
 
 def test_bronze_preserves_raw_kafka_fields_and_adds_utc_ingestion_time(spark):

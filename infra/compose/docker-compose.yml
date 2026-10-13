@@ -59,5 +59,50 @@ services:
       broker:
         condition: service_healthy
 
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - ingestion-api
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      PULSEFLOW_GRAFANA_DATASOURCE_URL: http://prometheus:9090
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - >-
+        test -n "$$GF_SECURITY_ADMIN_PASSWORD" ||
+        { echo "Set GRAFANA_ADMIN_PASSWORD before starting the observability profile." >&2; exit 1; };
+        exec /run.sh
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../grafana/provisioning/datasources/prometheus.yml:/etc/grafana/provisioning/datasources/pulseflow.yml:ro
+      - ../grafana/provisioning/dashboards/pulseflow.yml:/etc/grafana/provisioning/dashboards/pulseflow.yml:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
 volumes:
   kafka-data:
+  prometheus-data:
+  grafana-data:

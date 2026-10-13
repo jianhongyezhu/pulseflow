@@ -42,6 +42,15 @@ Kafka data is stored in the named `kafka-data` volume and survives normal
 container stops and removal. Do not use `docker compose down -v` unless you
 intentionally want to delete that volume and its Kafka data.
 
+## Local observability
+
+Prometheus and Grafana are optional Compose services under the `observability`
+profile. Start them and configure the WSL Spark exporter using the instructions
+in the repository [observability guide](../../docs/observability.md). The
+provisioned dashboard uses the Spring Actuator request histogram alongside
+Silver Structured Streaming progress. Existing event-publishing counters are
+also available in Prometheus.
+
 ## GitHub Actions CI
 
 The `CI` workflow runs on pull requests and pushes to `main`. It verifies the
