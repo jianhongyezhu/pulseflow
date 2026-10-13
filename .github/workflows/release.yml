@@ -1,0 +1,99 @@
+name: Publish ingestion API release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish GHCR image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REPOSITORY" != "jianhongyezhu/pulseflow" ]]; then
+            echo "::error::GHCR publishing is restricted to jianhongyezhu/pulseflow."
+            exit 1
+          fi
+
+          TAG="$GITHUB_REF_NAME"
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Expected a stable version tag in vMAJOR.MINOR.PATCH form."
+            exit 1
+          fi
+
+          TAG_COMMIT="$(git rev-parse --verify "refs/tags/${TAG}^{commit}")"
+          if [[ "$TAG_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "::error::The pushed tag does not resolve to the triggering commit."
+            exit 1
+          fi
+
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::The release tag commit is not part of origin/main."
+            exit 1
+          fi
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/jianhongyezhu/pulseflow-ingestion
+          tags: |
+            type=semver,pattern={{raw}}
+          flavor: |
+            latest=false
+          labels: |
+            org.opencontainers.image.source=https://github.com/jianhongyezhu/pulseflow
+            org.opencontainers.image.url=https://github.com/jianhongyezhu/pulseflow
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: services/ingestion-api
+          file: services/ingestion-api/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Summarize published image
+        env:
+          IMAGE: ghcr.io/jianhongyezhu/pulseflow-ingestion
+          VERSION: ${{ github.ref_name }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "## GHCR release published"
+            echo
+            echo "- Image: \`${IMAGE}\`"
+            echo "- Version: \`${VERSION}\`"
+            echo "- Published tag: \`${IMAGE_TAG}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Immutable image reference: \`${IMAGE}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
