@@ -1,0 +1,62 @@
+name: Streaming integration test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "python/pulseflow/streaming.py"
+      - "python/tests/**"
+      - "python/integration_tests/**"
+      - "python/pyproject.toml"
+      - "schemas/user-behaviour-v1.schema.json"
+      - "infra/compose/docker-compose.yml"
+      - "scripts/create-topics.sh"
+      - ".github/workflows/streaming-integration.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  kafka-to-parquet:
+    name: Kafka to Parquet integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Java 21 for Spark
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: python/pyproject.toml
+
+      - name: Install streaming test dependencies
+        run: python -m pip install -e "./python[streaming,dev]"
+
+      - name: Start disposable Kafka broker
+        run: docker compose -f infra/compose/docker-compose.yml up --detach broker
+
+      - name: Run Kafka-to-Parquet integration test
+        env:
+          KAFKA_BOOTSTRAP_SERVERS: localhost:9092
+        run: >-
+          python -m pytest -q -s
+          python/integration_tests/test_streaming_pipeline.py
+
+      - name: Collect broker diagnostics on failure
+        if: failure()
+        continue-on-error: true
+        run: docker compose -f infra/compose/docker-compose.yml logs --no-color broker
+
+      - name: Stop disposable Kafka broker
+        if: always()
+        continue-on-error: true
+        run: docker compose -f infra/compose/docker-compose.yml stop broker

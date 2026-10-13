@@ -87,6 +87,11 @@ class EventControllerTests {
     }
 
     @Test
+    void timestampWithoutRfc3339SeparatorReturnsBadRequest() throws Exception {
+        assertBadRequest(VALID_EVENT.replace("2025-05-04T12:30:00Z", "2025-05-04 12:30:00"));
+    }
+
+    @Test
     void unknownJsonPropertyReturnsBadRequest() throws Exception {
         assertBadRequest(VALID_EVENT.replace("\"event_id\":", "\"unexpected\": \"value\", \"event_id\":"));
     }

@@ -218,6 +218,14 @@ def test_explicit_null_attributes_are_quarantined(spark):
     assert "invalid_attributes" in quarantine.first().quality_errors
 
 
+def test_spark_rejects_blank_user_id_allowed_by_schema_min_length(spark):
+    event = event_payload(user_id=" ")
+    valid, quarantine = classify_payloads(spark, [json.dumps(event)])
+
+    assert valid.count() == 0
+    assert "blank_user_id" in quarantine.first().quality_errors
+
+
 def test_static_deduplication_and_gold_never_count_same_event_twice(spark):
     duplicate_id = "00000000-0000-0000-0000-000000000001"
     events = [
