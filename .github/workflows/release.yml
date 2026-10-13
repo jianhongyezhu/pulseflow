@@ -56,7 +56,7 @@ jobs:
         with:
           images: ghcr.io/jianhongyezhu/pulseflow-ingestion
           tags: |
-            type=semver,pattern={{version}}
+            type=semver,pattern={{raw}}
           flavor: |
             latest=false
           labels: |
@@ -84,7 +84,8 @@ jobs:
       - name: Summarize published image
         env:
           IMAGE: ghcr.io/jianhongyezhu/pulseflow-ingestion
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ github.ref_name }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tags }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           {
@@ -92,6 +93,7 @@ jobs:
             echo
             echo "- Image: \`${IMAGE}\`"
             echo "- Version: \`${VERSION}\`"
+            echo "- Published tag: \`${IMAGE_TAG}\`"
             echo "- Digest: \`${DIGEST}\`"
             echo "- Immutable image reference: \`${IMAGE}@${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"

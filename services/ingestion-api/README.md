@@ -111,7 +111,7 @@ git push origin v0.1.0
 For example, pull the image published for `v0.1.0` with:
 
 ```bash
-docker pull ghcr.io/jianhongyezhu/pulseflow-ingestion:0.1.0
+docker pull ghcr.io/jianhongyezhu/pulseflow-ingestion:v0.1.0
 ```
 
 Check the release workflow run's summary for its image name, version, and
@@ -120,9 +120,9 @@ metadata, use:
 
 ```bash
 docker buildx imagetools inspect \
-  ghcr.io/jianhongyezhu/pulseflow-ingestion:0.1.0
-docker pull ghcr.io/jianhongyezhu/pulseflow-ingestion:0.1.0
-docker image inspect ghcr.io/jianhongyezhu/pulseflow-ingestion:0.1.0 \
+  ghcr.io/jianhongyezhu/pulseflow-ingestion:v0.1.0
+docker pull ghcr.io/jianhongyezhu/pulseflow-ingestion:v0.1.0
+docker image inspect ghcr.io/jianhongyezhu/pulseflow-ingestion:v0.1.0 \
   --format '{{index .Config.Labels "org.opencontainers.image.source"}} {{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}'
 git rev-list -n 1 v0.1.0
 ```
