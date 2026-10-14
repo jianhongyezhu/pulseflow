@@ -41,6 +41,8 @@ metastore_db/
 *.parquet
 *.duckdb
 *.db
+artifacts/performance/*
+!artifacts/performance/.gitkeep
 
 # Logs and temporary files
 *.log

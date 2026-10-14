@@ -30,6 +30,14 @@ six-panel dashboard.
 The fast test pyramid, real Kafka-to-Parquet integration command, prerequisites,
 and known delivery limitations are documented in [docs/testing.md](docs/testing.md).
 
+## Performance and recovery
+
+The local k6 profiles, isolated Compose benchmark setup, bounded DuckDB
+freshness analysis, and safe Compose/kind recovery experiments are described
+in [the runbook](docs/runbook.md). Record only measured outcomes in
+[the performance report](docs/performance-report.md); its initial values are
+intentionally marked NOT RUN.
+
 This demonstration uses synthetic events and local services. Publishing or
 observing metrics does not deploy the platform to production or imply an
 end-to-end exactly-once delivery guarantee.

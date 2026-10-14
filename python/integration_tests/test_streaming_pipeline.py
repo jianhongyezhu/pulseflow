@@ -374,6 +374,7 @@ def test_kafka_streaming_writes_bronze_silver_gold_and_quarantine(tmp_path, monk
         assert bronze_partitions == bronze_dates
 
         silver_rows = _parquet_rows(spark, silver_path, SILVER_SCHEMA)
+        assert all(row.processed_at is not None for row in silver_rows)
         assert {row.event_id for row in silver_rows} == {
             event_id,
             future_event["event_id"],

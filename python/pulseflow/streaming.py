@@ -107,6 +107,7 @@ SILVER_SCHEMA = StructType(
         StructField("ingestion_timestamp", TimestampType(), True),
         *USER_EVENT_SCHEMA.fields,
         StructField("event_time", TimestampType(), True),
+        StructField("processed_at", TimestampType(), True),
         StructField("event_date", DateType(), True),
     ]
 )
@@ -202,6 +203,8 @@ class StreamingMetricsCollector:
 
     def update(self, progress: Mapping | None) -> None:
         if not isinstance(progress, Mapping):
+            with self._lock:
+                self._values.clear()
             return
 
         updates: dict[str, float] = {}
@@ -226,9 +229,8 @@ class StreamingMetricsCollector:
             if batch_duration is not None:
                 updates["pulseflow_stream_batch_duration_ms"] = batch_duration
 
-        if updates:
-            with self._lock:
-                self._values.update(updates)
+        with self._lock:
+            self._values = updates
 
     @staticmethod
     def _finite_number(value) -> float | None:
@@ -498,6 +500,7 @@ def start_pipeline(spark: SparkSession, config: PipelineConfig) -> list[Streamin
         valid, quarantine = classify_events(parsed)
         silver = (
             deduplicate_events(valid)
+            .withColumn("processed_at", F.current_timestamp())
             .withColumn("event_date", F.to_date("event_time"))
             .select(*SILVER_FIELDS)
         )
