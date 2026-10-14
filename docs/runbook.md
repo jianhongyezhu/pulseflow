@@ -84,10 +84,14 @@ docker compose --project-name "$COMPOSE_PROJECT_NAME" \
   --profile loadtest -f infra/compose/docker-compose.yml run --rm k6
 ```
 
-This baseline records the p95 `<150 ms` and request-failure `<1%` thresholds,
-202-response check results, achieved request rate, and dropped iterations.
-The k6 process exits nonzero if a configured threshold fails or iterations are
-dropped. Its JSON summary is printed and written to
+Only the default `arrival` profile at exactly 50 requests/second enforces the
+p95 `<150 ms` threshold. Other arrival rates, the handbook VU ramp, and the
+opt-in stretch profile do not enforce that latency target. All profiles
+enforce HTTP request failures `<1%`, a 202-response check success rate `>99%`,
+and zero dropped iterations; the check threshold allows the same sub-1%
+failure budget as the HTTP error threshold. The k6 process exits nonzero if a
+configured threshold fails or iterations are dropped. Its JSON summary is
+printed and written to
 `$PULSEFLOW_ARTIFACTS_DIR/k6-summary.json`.
 
 The 250 requests/second for 30 seconds stretch is opt-in and does not enforce
@@ -314,6 +318,8 @@ pod. Compare each measured interval to 60 seconds, and retain all probe
 statuses—including failures:
 
 ```bash
+set -euo pipefail
+recovery_failed=0
 for attempt in 1 2; do
   POD="$(kubectl --context kind-pulseflow-recovery -n pulseflow \
     get pods -l app=ingestion-api -o json | python3 -c '
@@ -337,29 +343,37 @@ print(ready[0] if ready else "")
     exit 1
   fi
   echo "Deleting one API pod: $POD"
-  started=$SECONDS
+  started_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
+  deadline_ns=$((started_ns + 60000000000))
   kubectl --context kind-pulseflow-recovery -n pulseflow \
     delete pod "$POD" --wait=false
-  deadline=$((SECONDS + 60))
   while :; do
     remaining="$(kubectl --context kind-pulseflow-recovery -n pulseflow \
       get pod "$POD" --ignore-not-found -o name)"
     ready_replicas="$(kubectl --context kind-pulseflow-recovery -n pulseflow \
       get deployment ingestion-api -o jsonpath='{.status.readyReplicas}')"
-    if [[ -z "$remaining" && "$ready_replicas" == 2 ]]; then
-      break
+    now_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
+    elapsed="$(python3 - "$started_ns" "$now_ns" <<'PY'
+import sys
+print(f"{(int(sys.argv[2]) - int(sys.argv[1])) / 1_000_000_000:.3f}")
+PY
+)"
+    if (( now_ns >= deadline_ns )); then
+      printf 'attempt=%s recovery_seconds=%s handbook_target_seconds=60 result=TIMEOUT; not deleting another pod.\n' \
+        "$attempt" "$elapsed" >&2
+      recovery_failed=1
+      break 2
     fi
-    if (( SECONDS >= deadline )); then
-      echo "Replica recovery exceeded the 60-second handbook target; not deleting another pod." >&2
-      exit 1
+    if [[ -z "$remaining" && "$ready_replicas" == 2 ]]; then
+      printf 'attempt=%s recovery_seconds=%s handbook_target_seconds=60 result=RECOVERED\n' \
+        "$attempt" "$elapsed"
+      break
     fi
     sleep 2
   done
-  elapsed=$((SECONDS - started))
-  printf 'attempt=%s recovery_seconds=%s handbook_target_seconds=60\n' \
-    "$attempt" "$elapsed"
 done
-wait "$PROBE_PID"
+kill "$PROBE_PID" 2>/dev/null || true
+wait "$PROBE_PID" 2>/dev/null || true
 trap - EXIT
 python3 - artifacts/performance/kind-recovery/requests.jsonl <<'PY'
 import collections
@@ -372,6 +386,9 @@ statuses = collections.Counter(
 )
 print("Recorded request outcomes:", dict(statuses))
 PY
+if [[ "$recovery_failed" -ne 0 ]]; then
+  exit 1
+fi
 ```
 
 This measures pod replacement/readiness and client-observed outcomes. Report

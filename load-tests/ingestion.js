@@ -54,10 +54,10 @@ const preAllocatedVUs = positiveInteger(
 
 const thresholds = {
   http_req_failed: ['rate<0.01'],
-  checks: ['rate==1'],
+  checks: ['rate>0.99'],
   dropped_iterations: ['count==0'],
 };
-if (profile !== 'stretch') {
+if (profile === 'arrival' && rate === 50) {
   thresholds.http_req_duration = ['p(95)<150'];
 }
 

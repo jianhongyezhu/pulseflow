@@ -73,13 +73,34 @@ failure_started=""
 recovery_started=""
 artifact_dir="${PULSEFLOW_ARTIFACTS_DIR:-$PROJECT_ROOT/artifacts/performance}"
 report="$artifact_dir/compose-recovery-$RUN_ID.json"
+recovery_started_ns=""
+
+monotonic_ns() {
+  python3 -c 'import time; print(time.monotonic_ns())'
+}
+
+recovery_elapsed_seconds() {
+  if [[ -z "$recovery_started_ns" ]]; then
+    printf ''
+    return
+  fi
+  local finished_ns="${1:-$(monotonic_ns)}"
+  python3 - "$recovery_started_ns" "$finished_ns" <<'PY'
+import sys
+
+elapsed_ns = max(0, int(sys.argv[2]) - int(sys.argv[1]))
+print(f"{elapsed_ns / 1_000_000_000:.6f}")
+PY
+}
 
 write_result() {
   local result="$1"
   local finished_at="$2"
+  local recovery_elapsed="$3"
   mkdir -p "$artifact_dir"
   python3 - "$report" "$PROJECT" "$RUN_ID" "$TOPIC" "$failure_status" \
     "$recovery_status" "$failure_started" "$recovery_started" "$finished_at" \
+    "$recovery_elapsed" \
     "$temporary_dir/failure-response.json" "$temporary_dir/recovery-response.json" \
     "$result" <<'PY'
 import json
@@ -96,6 +117,7 @@ from pathlib import Path
     failure_started,
     recovery_started,
     finished_at,
+    recovery_elapsed,
     failure_response_path,
     recovery_response_path,
     result,
@@ -107,10 +129,6 @@ def response_body(path):
     except (OSError, json.JSONDecodeError):
         return None
 
-recovery_seconds = None
-if recovery_started and finished_at:
-    recovery_seconds = int(finished_at) - int(recovery_started)
-
 Path(output).write_text(
     json.dumps({
         "project": project,
@@ -118,7 +136,7 @@ Path(output).write_text(
         "topic": topic,
         "failure_http_status": failure_status or None,
         "recovery_http_status": recovery_status or None,
-        "recovery_seconds": recovery_seconds,
+        "recovery_seconds": float(recovery_elapsed) if recovery_elapsed else None,
         "failure_response": response_body(failure_response_path),
         "recovery_response": response_body(recovery_response_path),
         "failure_started_epoch_seconds": int(failure_started) if failure_started else None,
@@ -135,15 +153,29 @@ PY
 
 restore_broker() {
   if [[ "$broker_stopped" == true ]]; then
-    echo "Attempting to restore the isolated broker after early exit." >&2
-    "${compose[@]}" up -d broker >/dev/null || true
+    local current_broker_id
+    local current_labels
+    current_broker_id="$("${compose[@]}" ps --all --quiet broker 2>/dev/null || true)"
+    if [[ -n "$current_broker_id" && "$current_broker_id" != *$'\n'* ]]; then
+      current_labels="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}} {{index .Config.Labels "com.docker.compose.service"}}' "$current_broker_id" 2>/dev/null || true)"
+    else
+      current_labels=""
+    fi
+    if [[ "$current_labels" == "$PROJECT broker" ]]; then
+      echo "Attempting to restore the verified isolated broker after early exit." >&2
+      "${compose[@]}" up -d broker >/dev/null || true
+    else
+      echo "Refusing cleanup restart: isolated broker project/service labels could not be verified." >&2
+    fi
   fi
   if [[ "$experiment_started" == true && "$result_written" != true ]]; then
-    write_result interrupted "$(date +%s)" || true
+    write_result interrupted "$(date +%s)" "$(recovery_elapsed_seconds)" || true
   fi
   rm -rf -- "$temporary_dir"
 }
 trap restore_broker EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 create_event() {
   python3 - "recovery-$RUN_ID" <<'PY'
@@ -169,9 +201,10 @@ PY
 
 post_event() {
   local output_file="$1"
+  local max_time="${2:-10}"
   local payload
   payload="$(create_event)"
-  curl --silent --show-error --max-time 10 \
+  curl --silent --show-error --max-time "$max_time" \
     --output "$output_file" --write-out '%{http_code}' \
     --header 'Content-Type: application/json' \
     --data "$payload" \
@@ -180,17 +213,19 @@ post_event() {
 
 experiment_started=true
 failure_started="$(date +%s)"
-"${compose[@]}" stop broker
 broker_stopped=true
+"${compose[@]}" stop broker
 failure_status="$(post_event "$temporary_dir/failure-response.json")"
 if [[ "$failure_status" != "503" ]]; then
   echo "Expected HTTP 503 during the broker outage, observed HTTP $failure_status." >&2
   cat "$temporary_dir/failure-response.json" >&2 || true
-  write_result "unexpected-outage-response" "$(date +%s)"
+  write_result "unexpected-outage-response" "$(date +%s)" ""
   exit 1
 fi
 
 recovery_started="$(date +%s)"
+recovery_started_ns="$(monotonic_ns)"
+recovery_deadline_ns=$((recovery_started_ns + 60000000000))
 "${compose[@]}" up -d broker
 restarted_broker_id="$("${compose[@]}" ps --quiet broker)"
 if [[ -z "$restarted_broker_id" || "$restarted_broker_id" == *$'\n'* ]]; then
@@ -199,25 +234,50 @@ if [[ -z "$restarted_broker_id" || "$restarted_broker_id" == *$'\n'* ]]; then
 fi
 verify_label "$restarted_broker_id" broker
 broker_id="$restarted_broker_id"
-deadline=$((recovery_started + 60))
 recovery_status=""
-while (( $(date +%s) < deadline )); do
+recovery_finished_ns="$recovery_started_ns"
+while :; do
+  now_ns="$(monotonic_ns)"
+  if (( now_ns >= recovery_deadline_ns )); then
+    recovery_finished_ns="$now_ns"
+    break
+  fi
   broker_health="$(docker inspect --format '{{.State.Health.Status}}' "$broker_id" 2>/dev/null || true)"
+  now_ns="$(monotonic_ns)"
+  if (( now_ns >= recovery_deadline_ns )); then
+    recovery_finished_ns="$now_ns"
+    break
+  fi
   if [[ "$broker_health" == "healthy" ]]; then
-    recovery_status="$(post_event "$temporary_dir/recovery-response.json")"
-    if [[ "$recovery_status" == "202" ]]; then
+    remaining_ns=$((recovery_deadline_ns - now_ns))
+    request_timeout="$(python3 - "$remaining_ns" <<'PY'
+import sys
+
+print(f"{int(sys.argv[1]) / 1_000_000_000:.9f}")
+PY
+)"
+    recovery_status="$(post_event "$temporary_dir/recovery-response.json" "$request_timeout")"
+    recovery_finished_ns="$(monotonic_ns)"
+    if [[ "$recovery_status" == "202" ]] \
+      && (( recovery_finished_ns < recovery_deadline_ns )); then
+      break
+    fi
+    if (( recovery_finished_ns >= recovery_deadline_ns )); then
       break
     fi
   fi
   sleep 1
+  recovery_finished_ns="$(monotonic_ns)"
 done
 
-if [[ "$recovery_status" != "202" ]]; then
-  echo "Recovery did not produce HTTP 202 within 60 seconds (last HTTP $recovery_status)." >&2
-  write_result "recovery-timeout" "$(date +%s)"
+if [[ "$recovery_status" != "202" ]] \
+  || (( recovery_finished_ns >= recovery_deadline_ns )); then
+  recovery_duration="$(recovery_elapsed_seconds "$recovery_finished_ns")"
+  echo "Recovery did not produce HTTP 202 within 60 seconds (last HTTP $recovery_status, elapsed ${recovery_duration}s)." >&2
+  write_result "recovery-timeout" "$(date +%s)" "$recovery_duration"
   exit 1
 fi
 broker_stopped=false
 recovered_at="$(date +%s)"
-recovery_seconds=$((recovered_at - recovery_started))
-write_result recovered "$recovered_at"
+recovery_duration="$(recovery_elapsed_seconds "$recovery_finished_ns")"
+write_result recovered "$recovered_at" "$recovery_duration"
