@@ -17,6 +17,7 @@ from pyspark.sql.types import (
 )
 
 from pulseflow.streaming import (
+    SILVER_SCHEMA,
     USER_EVENT_SCHEMA,
     WATERMARK_DELAY,
     PipelineConfig,
@@ -115,6 +116,8 @@ def test_event_schema_matches_v1_shape():
         "attributes",
     ]
     assert USER_EVENT_SCHEMA["attributes"].dataType.simpleString() == "map<string,string>"
+    assert SILVER_SCHEMA["processed_at"].dataType.simpleString() == "timestamp"
+    assert "processed_at" in SILVER_SCHEMA.fieldNames()
 
 
 def test_pipeline_config_reads_environment_and_resolves_paths(monkeypatch, tmp_path):
@@ -196,10 +199,7 @@ def test_silver_metrics_map_progress_and_omit_missing_fields():
     }
 
     collector.update({"sources": [{}], "durationMs": {}})
-    assert {
-        metric.name: metric.samples[0].value
-        for metric in collector.registry.collect()
-    } == samples
+    assert list(collector.registry.collect()) == []
 
 
 def test_silver_metrics_ignore_non_finite_or_invalid_progress_values():

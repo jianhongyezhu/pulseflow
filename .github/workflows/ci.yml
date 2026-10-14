@@ -70,6 +70,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Validate k6 benchmark script
+        run: >-
+          docker run --rm
+          --volume "$PWD/load-tests:/scripts:ro"
+          grafana/k6:0.55.0
+          inspect /scripts/ingestion.js
+
       - name: Build image
         run: >-
           docker build
