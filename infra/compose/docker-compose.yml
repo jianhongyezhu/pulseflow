@@ -67,7 +67,7 @@ services:
       K6_BASE_URL: ${K6_BASE_URL:-http://ingestion-api:8080}
       K6_PROFILE: ${K6_PROFILE:-arrival}
       K6_RATE: ${K6_RATE:-50}
-      K6_DURATION: ${K6_DURATION:-60s}
+      K6_PROFILE_DURATION: ${K6_PROFILE_DURATION:-60s}
       K6_PRE_ALLOCATED_VUS: ${K6_PRE_ALLOCATED_VUS:-50}
       K6_MAX_VUS: ${K6_MAX_VUS:-150}
       RUN_ID: ${RUN_ID:-local}
