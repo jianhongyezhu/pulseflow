@@ -62,6 +62,11 @@ over the run's Silver events, not the age of the latest event.
 | Handbook / `pulseflow-perf-01c990568c-corrected-handbook` | 553,090 | 553,090 | 0 | 0 | 7.153 s | 10.643 s |
 | Stretch / `pulseflow-perf-01c990568c-corrected-stretch-250` | 7,501 | 7,501 | 0 | 0 | 3.948 s | 5.521 s |
 
+| Target check | Target | Measured | Result |
+| --- | --- | --- | --- |
+| Baseline event freshness (50 requests/s) | p95 <5 seconds | p95 6.062 s | FAIL |
+| Spark processing throughput during each corrected profile | Processed rows/s >= input rows/s | Aggregate scrape includes invalid attempts and corrected profiles; per-profile comparison unavailable | NOT VERIFIED |
+
 One-second exporter sampling recorded 370 samples. Input rows/s had p50 182.8,
 p95 5,227.2, and maximum 6,769.5; processed rows/s had p50 226.55, p95
 5,216.1, and maximum 6,013.6. Batch duration had p50 2,241 ms, p95 4,371 ms,
