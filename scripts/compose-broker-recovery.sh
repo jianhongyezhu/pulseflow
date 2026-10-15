@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$PROJECT_ROOT/infra/compose/docker-compose.yml"
+OUTAGE_REQUEST_TIMEOUT_SECONDS=70
 PROJECT="${COMPOSE_PROJECT_NAME:-}"
 RUN_ID="${RUN_ID:-}"
 API_PORT="${PULSEFLOW_API_HOST_PORT:-}"
@@ -215,7 +216,7 @@ experiment_started=true
 failure_started="$(date +%s)"
 broker_stopped=true
 "${compose[@]}" stop broker
-failure_status="$(post_event "$temporary_dir/failure-response.json")"
+failure_status="$(post_event "$temporary_dir/failure-response.json" "$OUTAGE_REQUEST_TIMEOUT_SECONDS")"
 if [[ "$failure_status" != "503" ]]; then
   echo "Expected HTTP 503 during the broker outage, observed HTTP $failure_status." >&2
   cat "$temporary_dir/failure-response.json" >&2 || true

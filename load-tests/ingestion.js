@@ -38,7 +38,7 @@ const rate = positiveInteger(
   1000,
 );
 const profileDuration = duration(
-  'K6_DURATION',
+  'K6_PROFILE_DURATION',
   profile === 'stretch' ? '30s' : '60s',
 );
 const maxVUs = positiveInteger(

@@ -77,7 +77,7 @@ The handbook's **50 requests/second** latency target uses a constant-arrival
 rate executor, independently of VU count:
 
 ```bash
-K6_PROFILE=arrival K6_RATE=50 K6_DURATION=60s \
+K6_PROFILE=arrival K6_RATE=50 K6_PROFILE_DURATION=60s \
 K6_PRE_ALLOCATED_VUS=50 K6_MAX_VUS=150 \
 RUN_ID="$RUN_ID" K6_BASE_URL=http://ingestion-api:8080 \
 docker compose --project-name "$COMPOSE_PROJECT_NAME" \
@@ -98,7 +98,7 @@ The 250 requests/second for 30 seconds stretch is opt-in and does not enforce
 the 150 ms p95 target:
 
 ```bash
-K6_PROFILE=stretch K6_RATE=250 K6_DURATION=30s \
+K6_PROFILE=stretch K6_RATE=250 K6_PROFILE_DURATION=30s \
 K6_PRE_ALLOCATED_VUS=250 K6_MAX_VUS=500 \
 RUN_ID="$RUN_ID" K6_BASE_URL=http://ingestion-api:8080 \
 docker compose --project-name "$COMPOSE_PROJECT_NAME" \
@@ -186,6 +186,9 @@ The output and `compose-recovery-$RUN_ID.json` record the outage status,
 recovery status/time, and result. On early failure, the script attempts to
 restart the broker. It never removes a container, volume, topic, or dataset.
 Do not run this against the normal Compose project or the default topic.
+The outage request has a 70-second client bound because Kafka's default
+`max.block.ms` is 60 seconds; `KafkaTemplate.send()` may wait for metadata
+before the publisher's separate three-second acknowledgement wait begins.
 
 Afterward, stop only the isolated project without removing its Kafka volume:
 
@@ -243,7 +246,7 @@ measure a normal baseline before deleting a pod:
 
 ```bash
 kubectl --context kind-pulseflow-recovery -n pulseflow \
-  port-forward service/ingestion-api 18080:8080
+  port-forward service/ingestion-api 18081:8080
 ```
 
 With the project Python environment active, send 20 baseline requests and
@@ -251,7 +254,7 @@ record the generator's successful/failed counts:
 
 ```bash
 python -m pulseflow.generator \
-  --url http://127.0.0.1:18080/v1/events \
+  --url http://127.0.0.1:18081/v1/events \
   --events 20 --rps 2 --duplicate-rate 0
 ```
 
@@ -287,7 +290,7 @@ with open(output, "w", encoding="utf-8") as report:
             "attributes": {"source": "kind-recovery-probe"},
         }
         request = urllib.request.Request(
-            "http://127.0.0.1:18080/v1/events",
+            "http://127.0.0.1:18081/v1/events",
             data=json.dumps(event).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -311,6 +314,13 @@ PY
 PROBE_PID=$!
 trap 'kill "$PROBE_PID" 2>/dev/null || true' EXIT
 ```
+
+The service port-forward may select one backing API pod. If that pod is deleted,
+the port-forward itself can exit; subsequent network errors then measure the
+forwarding path, not necessarily Service availability. Preserve those outcomes
+and do not claim uninterrupted availability. For a Service-level availability
+measurement, run the probe from inside the dedicated cluster against
+`http://ingestion-api.pulseflow.svc.cluster.local:8080/v1/events`.
 
 Delete exactly one selected API pod at a time. After each deletion, measure
 until two replicas are Ready again; wait for that before selecting the next
